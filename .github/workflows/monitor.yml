@@ -28,13 +28,13 @@ name: Site Monitor Check
 #
 # State tracking:
 #
-# - Previous status is persisted in the `state` branch (state/status.txt)
+# - Previous status is persisted in the `state` branch (status.txt)
 # - The `state` branch is separate from main — main history stays clean
 # - State commits never appear on main
 #
 # Known limitation:
 #
-# - On the very first run, state/status.txt does not exist
+# - On the very first run, status.txt does not exist
 # - Previous state defaults to UP on first run
 # - This means a first-run DOWN will correctly trigger an alert
 #
@@ -189,8 +189,8 @@ jobs:
       # ======================================================
       # STEP 4: RESTORE PREVIOUS STATE (STATE BRANCH)
       # ======================================================
-      # Checks out the `state` branch into a separate folder.
-      # This branch only holds state/status.txt — never shown on main.
+      # Reads status.txt from the root of the `state` branch.
+      # This branch only holds status.txt — never shown on main.
       # If the branch or file does not exist, PREV_STATUS defaults to UP.
       - name: Restore previous status
         id: restore
@@ -202,10 +202,10 @@ jobs:
           # Attempt to fetch state branch — may not exist on first run
           if git ls-remote --exit-code origin state > /dev/null 2>&1; then
             git fetch origin state
-            git checkout origin/state -- state/status.txt 2>/dev/null || true
+            git checkout origin/state -- status.txt 2>/dev/null || true
 
-            if [ -f state/status.txt ]; then
-              PREV_STATUS=$(cat state/status.txt)
+            if [ -f status.txt ]; then
+              PREV_STATUS=$(cat status.txt)
               echo "[INFO] State file found"
             else
               echo "[INFO] State file not found on state branch — defaulting to UP"
@@ -345,7 +345,7 @@ jobs:
       # ======================================================
       # STEP 9: SAVE STATE TO STATE BRANCH
       # ======================================================
-      # Writes status to state/status.txt on the `state` branch.
+      # Writes status.txt to the root of the `state` branch.
       # The `state` branch is completely separate from main.
       # Main history stays clean — no state commits ever appear on main.
       - name: Save state
@@ -368,11 +368,10 @@ jobs:
             git rm -rf . > /dev/null 2>&1 || true
           fi
 
-          # Write status
-          mkdir -p state
-          echo "$STATUS" > state/status.txt
+          # Write status to root of state branch
+          echo "$STATUS" > status.txt
 
-          git add state/status.txt
+          git add status.txt
           git diff --staged --quiet || git commit -m "state"
           git push origin state
 
