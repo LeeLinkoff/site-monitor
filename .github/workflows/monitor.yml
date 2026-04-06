@@ -1,0 +1,327 @@
+name: Site Monitor Check
+
+# ==========================================================
+# ALERTING BEHAVIOR
+# ==========================================================
+# This workflow performs uptime checks on a scheduled basis
+# and sends notifications via email and ntfy.
+#
+# Alerting rules:
+#
+# - UP → UP
+#     No alert (no noise when system is healthy)
+#
+# - UP → DOWN
+#     Send alert (initial failure detection)
+#
+# - DOWN → DOWN
+#     Send alert every scheduled run (persistent failure reminders)
+#
+# - DOWN → UP
+#     Send alert once (recovery notification)
+#
+# Schedule behavior:
+#
+# - cron: "17 * * * *"
+#     Runs once per hour at minute 17 (UTC)
+#     Note: GitHub Actions scheduling is best-effort and may not run exactly on time
+#
+# State tracking:
+#
+# - Previous status is persisted using GitHub Actions cache
+# - Cache uses dynamic keys with restore-keys to retrieve the latest prior state
+# - This avoids repository commits while maintaining cross-run state
+#
+# Known limitation:
+#
+# - In rare cases where cache is unavailable, previous state defaults to UNKNOWN
+# - This may result in one extra alert on that run
+#
+# ==========================================================
+
+# ==========================================================
+# TRIGGERS
+# ==========================================================
+on:
+  schedule:
+    - cron: "17 * * * *"     # hourly schedule (best-effort; GitHub Actions timing is not exact, runs near top of hour UTC)
+  workflow_dispatch:          # allows manual runs from the UI
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+
+    # ======================================================
+    # ENV VARIABLES (SET IN REPO SETTINGS)
+    # ======================================================
+    env:
+      TARGET_URL: ${{ vars.TARGET_URL }}     # URL to monitor
+      EMAIL_TO: ${{ secrets.EMAIL_TO }}      # alert destination email
+      GMAIL_USER: ${{ secrets.GMAIL_USER }}  # Gmail sender
+      GMAIL_PASS: ${{ secrets.GMAIL_PASS }}  # Gmail APP PASSWORD (NOT normal password)
+      NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}  # ntfy topic
+
+    steps:
+
+      # ==========================================================
+      # LOGGING BEHAVIOR (GITHUB ACTIONS QUIRK)
+      # ==========================================================
+      # All logs use echo:
+      #   echo "[INFO] message"
+      #   echo "[ERROR] message"
+      #
+      # IMPORTANT:
+      # - GitHub Actions automatically prefixes failed step output with:
+      #     "Error: ..."
+      #
+      # - This happens whenever the script exits non-zero (e.g., exit 1)
+      # - It is NOT controlled by echo, printf, stdout, or stderr
+      # - It cannot be disabled from within the workflow
+      #
+      # RESULT:
+      # - Informational logs appear exactly as written:
+      #     [INFO] ...
+      #
+      # - Error logs may appear as:
+      #     Error: ...
+      #   even if the script prints:
+      #     [ERROR] ...
+      #
+      # This inconsistency is caused by GitHub's runner, not the script.
+      # ==========================================================
+
+      # ======================================================
+      # STEP 1: DEBUG CONFIG
+      # ======================================================
+      - name: Debug configuration
+        run: |
+          echo "[INFO] ========== CONFIG =========="
+          echo "[INFO] TARGET_URL=$TARGET_URL"
+          echo "[INFO] EMAIL_TO=$EMAIL_TO"
+          echo "[INFO] NTFY_TOPIC=$NTFY_TOPIC"
+          echo "[INFO] GMAIL_USER=$GMAIL_USER"
+          echo "[INFO] GMAIL_PASS_LENGTH=${#GMAIL_PASS}"
+
+          # HARD FAIL IF REQUIRED VALUES MISSING
+          if [ -z "$TARGET_URL" ]; then
+            echo "[ERROR] TARGET_URL is not set"
+            exit 1
+          fi
+
+          if [ -z "$EMAIL_TO" ]; then
+            echo "[ERROR] EMAIL_TO is not set"
+            exit 1
+          fi
+
+          if [ -z "$GMAIL_USER" ]; then
+            echo "[ERROR] GMAIL_USER is not set"
+            exit 1
+          fi
+
+          if [ -z "$GMAIL_PASS" ]; then
+            echo "[ERROR] GMAIL_PASS is not set (must be Gmail App Password)"
+            exit 1
+          fi
+
+          if [ -z "$NTFY_TOPIC" ]; then
+            echo "[ERROR] NTFY_TOPIC is not set"
+            exit 1
+          fi
+
+          echo "[INFO] CONFIG VALID"
+          echo "[INFO] ============================"
+
+      # ======================================================
+      # STEP 2: CHECK WEBSITE
+      # ======================================================
+      - name: Check site
+        id: check
+        run: |
+          set -euo pipefail
+
+          echo "[INFO] ========== SITE CHECK =========="
+          echo "[INFO] Checking URL: $TARGET_URL"
+
+          # FIX: initialize CURL_EXIT=0 before curl so it's never unbound under set -u
+          CURL_EXIT=0
+          CURL_OUTPUT=$(curl -v --max-time 10 --connect-timeout 5 -o /dev/null -s -w '%{http_code}' "$TARGET_URL" 2>&1) || CURL_EXIT=$?
+
+          HTTP_CODE=$(echo "$CURL_OUTPUT" | tail -n1)
+
+          echo "[INFO] ---- CURL OUTPUT ----"
+          echo "[INFO] $CURL_OUTPUT"
+          echo "[INFO] ---------------------"
+
+          if [ "$CURL_EXIT" != "0" ]; then
+            echo  "[ERROR] NETWORK FAILURE"
+            echo  "[ERROR] DETAIL: DNS failure, timeout, or unreachable host"
+            HTTP_CODE="000"
+          fi
+
+          echo "[INFO] HTTP_CODE=$HTTP_CODE"
+
+          if [ "$HTTP_CODE" = "200" ]; then
+            STATUS="UP"
+          else
+            STATUS="DOWN"
+          fi
+
+          echo "[INFO] STATUS=$STATUS"
+          echo "[INFO] ==============================="
+
+          echo "status=$STATUS" >> "$GITHUB_OUTPUT"
+          echo "http_code=$HTTP_CODE" >> "$GITHUB_OUTPUT"
+
+      # ======================================================
+      # STEP 3: RESTORE PREVIOUS STATE (CACHE)
+      # ======================================================
+      - name: Restore previous status
+        uses: actions/cache@v4
+        with:
+          path: status.txt
+          key: uptime-status-${{ github.run_id }}
+          restore-keys: uptime-status-
+
+      # ======================================================
+      # STEP 4: DECIDE IF ALERT IS NEEDED
+      # ======================================================
+      - name: Decide alert
+        id: decide
+        run: |
+          STATUS="${{ steps.check.outputs.status }}"
+          STATE_FILE="status.txt"
+          PREV_STATUS="UNKNOWN"
+
+          if [ -f "$STATE_FILE" ]; then
+            PREV_STATUS=$(cat "$STATE_FILE")
+          fi
+
+          echo "[INFO] CURRENT_STATUS=$STATUS"
+          echo "[INFO] PREVIOUS_STATUS=$PREV_STATUS"
+
+          SEND_ALERT="false"
+
+          # RULES:
+          # - Always alert if DOWN (repeat notifications)
+          # - Alert once when recovering (DOWN -> UP)
+          if [ "$STATUS" = "DOWN" ]; then
+            SEND_ALERT="true"
+          elif [ "$STATUS" = "UP" ] && [ "$PREV_STATUS" = "DOWN" ]; then
+            SEND_ALERT="true"
+          fi
+
+          echo "[INFO] SEND_ALERT=$SEND_ALERT"
+          echo "send_alert=$SEND_ALERT" >> "$GITHUB_OUTPUT"
+
+      # ======================================================
+      # STEP 5: INSTALL SMTP CLIENT (ONLY IF NEEDED)
+      # ======================================================
+      - name: Install msmtp
+        if: steps.decide.outputs.send_alert == 'true'
+        run: |
+          echo "[INFO] Installing email client (msmtp)..."
+
+          sudo apt-get update || {
+            echo "[ERROR] apt-get update failed"
+            exit 1
+          }
+
+          sudo apt-get install -y msmtp || {
+            echo "[ERROR] msmtp installation failed"
+            exit 1
+          }
+
+          echo "[INFO] msmtp installed"
+
+      # ======================================================
+      # STEP 6: CONFIGURE SMTP (ONLY IF NEEDED)
+      # ======================================================
+      - name: Configure SMTP
+        if: steps.decide.outputs.send_alert == 'true'
+        run: |
+          echo "[INFO] Configuring Gmail SMTP..."
+
+          echo "account default" > ~/.msmtprc
+          echo "host smtp.gmail.com" >> ~/.msmtprc
+          echo "port 587" >> ~/.msmtprc
+          echo "auth on" >> ~/.msmtprc
+          echo "user $GMAIL_USER" >> ~/.msmtprc
+          echo "password $GMAIL_PASS" >> ~/.msmtprc
+          echo "from $GMAIL_USER" >> ~/.msmtprc
+          echo "tls on" >> ~/.msmtprc
+          echo "tls_starttls on" >> ~/.msmtprc
+
+          chmod 600 ~/.msmtprc || {
+            echo "[ERROR] Failed to secure SMTP config file"
+            exit 1
+          }
+
+          echo "[INFO] SMTP CONFIG READY"
+
+      # ======================================================
+      # STEP 7: SEND ALERTS (ONLY IF NEEDED)
+      # ======================================================
+      - name: Send alerts
+        if: steps.decide.outputs.send_alert == 'true'
+        run: |
+          set -euo pipefail
+
+          STATUS="${{ steps.check.outputs.status }}"
+          CODE="${{ steps.check.outputs.http_code }}"
+
+          echo "[INFO] ========== ALERT PHASE =========="
+          echo "[INFO] STATUS=$STATUS"
+          echo "[INFO] HTTP_CODE=$CODE"
+
+          if [ "$STATUS" = "DOWN" ]; then
+            SUBJECT="SITE DOWN"
+            BODY="$TARGET_URL is DOWN (status $CODE)"
+          else
+            SUBJECT="SITE UP"
+            BODY="$TARGET_URL is UP"
+          fi
+
+          echo -e "Subject: $SUBJECT\n\n$BODY" > mail.txt
+
+          # --------------------------------------------------
+          # EMAIL SEND
+          # --------------------------------------------------
+          echo "[INFO] Sending email..."
+
+          msmtp "$EMAIL_TO" < mail.txt 2>&1 || {
+            echo "[ERROR] EMAIL SEND FAILED"
+            echo "[ERROR] DETAIL: Gmail app password incorrect, 2FA not enabled, Gmail blocking SMTP, EMAIL_TO invalid."
+            exit 1
+          }
+
+          echo "[INFO] EMAIL SENT OK"
+
+          # --------------------------------------------------
+          # NTFY SEND
+          # --------------------------------------------------
+          echo "[INFO] Sending ntfy push..."
+
+          curl -v -H "Title: $SUBJECT" -H "Priority: high" -H "Cache: yes" -d "$BODY" "https://ntfy.sh/$NTFY_TOPIC" 2>&1 || {
+            echo "[ERROR] NTFY PUSH FAILED"
+            echo "[ERROR] DETAIL: ntfy topic invalid, network issue."
+            exit 1
+          }
+
+          echo "[INFO] NTFY SENT OK"
+          echo "[INFO] ================================"
+
+      # ======================================================
+      # STEP 8: SAVE CURRENT STATE
+      # ======================================================
+      - name: Save state
+        run: |
+          echo "${{ steps.check.outputs.status }}" > status.txt
+
+      # FIX: use actions/cache/save@v4 (save-only) instead of actions/cache@v4 (which is restore)
+      # FIX: use run_id in key so the save is never a no-op (static keys are frozen after first write)
+      - name: Cache state
+        continue-on-error: true
+        uses: actions/cache/save@v4
+        with:
+          path: status.txt
+          key: uptime-status-${{ github.run_id }}
