@@ -98,7 +98,14 @@ jobs:
       # ==========================================================
 
       # ======================================================
-      # STEP 1: DEBUG CONFIG
+      # STEP 1: CHECKOUT
+      # ======================================================
+      # Required for all git operations (state branch read/write)
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ======================================================
+      # STEP 2: DEBUG CONFIG
       # ======================================================
       - name: Debug configuration
         run: |
@@ -139,7 +146,7 @@ jobs:
           echo "[INFO] ============================"
 
       # ======================================================
-      # STEP 2: CHECK WEBSITE
+      # STEP 3: CHECK WEBSITE
       # ======================================================
       - name: Check site
         id: check
@@ -180,7 +187,7 @@ jobs:
           echo "http_code=$HTTP_CODE" >> "$GITHUB_OUTPUT"
 
       # ======================================================
-      # STEP 3: RESTORE PREVIOUS STATE (STATE BRANCH)
+      # STEP 4: RESTORE PREVIOUS STATE (STATE BRANCH)
       # ======================================================
       # Checks out the `state` branch into a separate folder.
       # This branch only holds state/status.txt — never shown on main.
@@ -213,7 +220,7 @@ jobs:
           echo "prev_status=$PREV_STATUS" >> "$GITHUB_OUTPUT"
 
       # ======================================================
-      # STEP 4: DECIDE IF ALERT IS NEEDED
+      # STEP 5: DECIDE IF ALERT IS NEEDED
       # ======================================================
       - name: Decide alert
         id: decide
@@ -239,7 +246,7 @@ jobs:
           echo "send_alert=$SEND_ALERT" >> "$GITHUB_OUTPUT"
 
       # ======================================================
-      # STEP 5: INSTALL SMTP CLIENT (ONLY IF NEEDED)
+      # STEP 6: INSTALL SMTP CLIENT (ONLY IF NEEDED)
       # ======================================================
       - name: Install msmtp
         if: steps.decide.outputs.send_alert == 'true'
@@ -259,7 +266,7 @@ jobs:
           echo "[INFO] msmtp installed"
 
       # ======================================================
-      # STEP 6: CONFIGURE SMTP (ONLY IF NEEDED)
+      # STEP 7: CONFIGURE SMTP (ONLY IF NEEDED)
       # ======================================================
       - name: Configure SMTP
         if: steps.decide.outputs.send_alert == 'true'
@@ -284,7 +291,7 @@ jobs:
           echo "[INFO] SMTP CONFIG READY"
 
       # ======================================================
-      # STEP 7: SEND ALERTS (ONLY IF NEEDED)
+      # STEP 8: SEND ALERTS (ONLY IF NEEDED)
       # ======================================================
       - name: Send alerts
         if: steps.decide.outputs.send_alert == 'true'
@@ -336,7 +343,7 @@ jobs:
           echo "[INFO] ================================"
 
       # ======================================================
-      # STEP 8: SAVE STATE TO STATE BRANCH
+      # STEP 9: SAVE STATE TO STATE BRANCH
       # ======================================================
       # Writes status to state/status.txt on the `state` branch.
       # The `state` branch is completely separate from main.
