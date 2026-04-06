@@ -1,5 +1,6 @@
-# site-monitor
-Hourly uptime monitor using GitHub Actions with email and ntfy push alerts. Stateful alerting with repeat down notifications and single recovery alert.
+# Site Monitor (GitHub Actions)
+
+Lightweight uptime monitoring using GitHub Actions with email and ntfy alerts.
 
 ---
 
@@ -15,12 +16,25 @@ This system is designed as:
 
 ---
 
+## Why GitHub Actions
+
+GitHub Actions is a well known, documented approach for free external uptime monitoring. It runs on infrastructure completely independent of your hosting provider, which matters for a few reasons:
+
+- it is free with no commercial dependency
+- commercial uptime monitoring services can go down, change pricing, or cease to exist — GitHub Actions has none of those risks
+- it runs outside your hosting environment, so if your host goes down, the monitor still runs
+- the pattern is widely used and recognized in the developer community
+
+This is a deliberate architectural choice, not a workaround.
+
+---
+
 ## How It Works
 
 - A scheduled GitHub Actions workflow runs hourly
 - The workflow sends an HTTP request to the target URL
 - If the response is not HTTP 200, the system marks the site as DOWN
-- Previous state is restored using GitHub Actions cache
+- Previous state is persisted in a dedicated `state` branch
 - Alerts are sent based on state transitions and current status
 
 ---
@@ -54,7 +68,7 @@ cron: "17 * * * *"
 - curl (HTTP checks)
 - msmtp (email alerts via Gmail)
 - ntfy (push notifications)
-- GitHub Actions cache (state persistence)
+- `state` branch (state persistence)
 
 ---
 
@@ -92,9 +106,9 @@ This setup does not verify:
 
 ## State Persistence
 
-- Previous status is stored using GitHub Actions cache
-- Cache uses dynamic keys with restore-keys to retrieve the latest state
-- No repository commits or external storage required
+Previous status is stored in a dedicated `state` branch in this repository. This branch contains only `state/status.txt` and is completely separate from `main`. The `main` branch history stays clean — no automated state commits ever appear on `main`.
+
+This approach is more reliable than GitHub Actions cache, which is best-effort and can silently fail to persist between runs.
 
 ---
 
@@ -102,9 +116,7 @@ This setup does not verify:
 
 - GitHub Actions is not a real-time scheduler
 - Execution timing may drift
-- Cache persistence is best-effort
-- In rare cases (cache miss), previous state defaults to UNKNOWN
-  - This may result in one extra alert
+- On the very first run, no previous state exists and defaults to UP
 
 ### ntfy iOS App — Message History
 
@@ -121,6 +133,7 @@ https://ntfy.sh/<your-topic>/json?poll=1&since=24h
 
 ## Usage
 
+- Create a `state` branch in the repository before the first run
 - Configure TARGET_URL
 - Set required secrets
 - Run the workflow manually once to validate alerts
@@ -135,5 +148,6 @@ This provides a cost-free, external uptime monitoring layer with:
 - state-aware alerting
 - repeated outage notifications
 - recovery detection
+- no commercial dependency
 
 Best used as a backup monitor, not a primary production monitoring system requiring strict timing guarantees.
