@@ -28,14 +28,15 @@ name: Site Monitor Check
 #
 # State tracking:
 #
-# - Previous status is persisted using GitHub Actions cache
-# - Cache uses dynamic keys with restore-keys to retrieve the latest prior state
-# - This avoids repository commits while maintaining cross-run state
+# - Previous status is persisted in the `state` branch (state/status.txt)
+# - The `state` branch is separate from main — main history stays clean
+# - State commits never appear on main
 #
 # Known limitation:
 #
-# - In rare cases where cache is unavailable, previous state defaults to UNKNOWN
-# - This may result in one extra alert on that run
+# - On the very first run, state/status.txt does not exist
+# - Previous state defaults to UP on first run
+# - This means a first-run DOWN will correctly trigger an alert
 #
 # ==========================================================
 
@@ -50,6 +51,12 @@ on:
 jobs:
   check:
     runs-on: ubuntu-latest
+
+    # ======================================================
+    # PERMISSIONS REQUIRED TO PUSH STATE TO STATE BRANCH
+    # ======================================================
+    permissions:
+      contents: write
 
     # ======================================================
     # ENV VARIABLES (SET IN REPO SETTINGS)
@@ -173,14 +180,37 @@ jobs:
           echo "http_code=$HTTP_CODE" >> "$GITHUB_OUTPUT"
 
       # ======================================================
-      # STEP 3: RESTORE PREVIOUS STATE (CACHE)
+      # STEP 3: RESTORE PREVIOUS STATE (STATE BRANCH)
       # ======================================================
+      # Checks out the `state` branch into a separate folder.
+      # This branch only holds state/status.txt — never shown on main.
+      # If the branch or file does not exist, PREV_STATUS defaults to UP.
       - name: Restore previous status
-        uses: actions/cache@v4
-        with:
-          path: status.txt
-          key: uptime-status-${{ github.run_id }}
-          restore-keys: uptime-status-
+        id: restore
+        run: |
+          echo "[INFO] ========== STATE RESTORE =========="
+
+          PREV_STATUS="UP"
+
+          # Attempt to fetch state branch — may not exist on first run
+          if git ls-remote --exit-code origin state > /dev/null 2>&1; then
+            git fetch origin state
+            git checkout origin/state -- state/status.txt 2>/dev/null || true
+
+            if [ -f state/status.txt ]; then
+              PREV_STATUS=$(cat state/status.txt)
+              echo "[INFO] State file found"
+            else
+              echo "[INFO] State file not found on state branch — defaulting to UP"
+            fi
+          else
+            echo "[INFO] State branch does not exist yet — defaulting to UP"
+          fi
+
+          echo "[INFO] PREV_STATUS=$PREV_STATUS"
+          echo "[INFO] ======================================="
+
+          echo "prev_status=$PREV_STATUS" >> "$GITHUB_OUTPUT"
 
       # ======================================================
       # STEP 4: DECIDE IF ALERT IS NEEDED
@@ -189,12 +219,7 @@ jobs:
         id: decide
         run: |
           STATUS="${{ steps.check.outputs.status }}"
-          STATE_FILE="status.txt"
-          PREV_STATUS="UNKNOWN"
-
-          if [ -f "$STATE_FILE" ]; then
-            PREV_STATUS=$(cat "$STATE_FILE")
-          fi
+          PREV_STATUS="${{ steps.restore.outputs.prev_status }}"
 
           echo "[INFO] CURRENT_STATUS=$STATUS"
           echo "[INFO] PREVIOUS_STATUS=$PREV_STATUS"
@@ -311,17 +336,38 @@ jobs:
           echo "[INFO] ================================"
 
       # ======================================================
-      # STEP 8: SAVE CURRENT STATE
+      # STEP 8: SAVE STATE TO STATE BRANCH
       # ======================================================
+      # Writes status to state/status.txt on the `state` branch.
+      # The `state` branch is completely separate from main.
+      # Main history stays clean — no state commits ever appear on main.
       - name: Save state
         run: |
-          echo "${{ steps.check.outputs.status }}" > status.txt
+          echo "[INFO] ========== STATE SAVE =========="
 
-      # FIX: use actions/cache/save@v4 (save-only) instead of actions/cache@v4 (which is restore)
-      # FIX: use run_id in key so the save is never a no-op (static keys are frozen after first write)
-      - name: Cache state
-        continue-on-error: true
-        uses: actions/cache/save@v4
-        with:
-          path: status.txt
-          key: uptime-status-${{ github.run_id }}
+          STATUS="${{ steps.check.outputs.status }}"
+
+          # Configure git
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+
+          # Check out state branch if it exists, otherwise create it
+          if git ls-remote --exit-code origin state > /dev/null 2>&1; then
+            git fetch origin state
+            git checkout -b state origin/state
+          else
+            echo "[INFO] Creating state branch for the first time"
+            git checkout --orphan state
+            git rm -rf . > /dev/null 2>&1 || true
+          fi
+
+          # Write status
+          mkdir -p state
+          echo "$STATUS" > state/status.txt
+
+          git add state/status.txt
+          git diff --staged --quiet || git commit -m "state"
+          git push origin state
+
+          echo "[INFO] STATUS=$STATUS saved to state branch"
+          echo "[INFO] ==================================="
