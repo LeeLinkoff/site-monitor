@@ -1,0 +1,10 @@
+name: keepalive
+on:
+  schedule:
+    - cron: '27 1 * * SUN'
+jobs:
+  keepalive:
+    runs-on: ubuntu-latest
+    steps:
+      - name: keepalive
+        uses: efrecon/gh-action-keepalive@main
