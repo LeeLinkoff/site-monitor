@@ -176,9 +176,16 @@ jobs:
 
             echo "[INFO] Checking URL: $URL"
 
+            # -L makes curl follow HTTP redirects (301/302) instead of stopping
+            # at the redirect response. Needed because some sites redirect the
+            # bare domain to a www version (or http to https, or similar), and
+            # without -L curl reports the redirect itself, which this script
+            # counts as DOWN even though the site is actually fine. Confirmed
+            # against a real run log on 2026-07-03, not a guess.
+
             # FIX: initialize CURL_EXIT=0 before curl so it's never unbound under set -u
             CURL_EXIT=0
-            CURL_OUTPUT=$(curl -v --max-time 10 --connect-timeout 5 -o /dev/null -s -w '%{http_code}' "$URL" 2>&1) || CURL_EXIT=$?
+            CURL_OUTPUT=$(curl -v -L --max-time 10 --connect-timeout 5 -o /dev/null -s -w '%{http_code}' "$URL" 2>&1) || CURL_EXIT=$?
 
             HTTP_CODE=$(echo "$CURL_OUTPUT" | tail -n1)
 
