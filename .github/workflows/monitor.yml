@@ -6,7 +6,10 @@ name: Site Monitor Check
 # This workflow performs uptime checks on a scheduled basis
 # and sends notifications via email and ntfy.
 #
-# Alerting rules:
+# TARGET_URL now accepts one or more URLs, comma-separated.
+# Example: https://leelinkoff.com,https://nuvrix.io
+#
+# Alerting rules (per URL):
 #
 # - UP → UP
 #     No alert (no noise when system is healthy)
@@ -20,6 +23,13 @@ name: Site Monitor Check
 # - DOWN → UP
 #     Send alert once (recovery notification)
 #
+# If any URL needs an alert this run, one consolidated email/ntfy
+# message is sent listing every monitored URL's current status,
+# formatted as:
+#
+#     <url>: UP
+#     <url>: DOWN
+#
 # Schedule behavior:
 #
 # - cron: "17 * * * *"
@@ -28,14 +38,15 @@ name: Site Monitor Check
 #
 # State tracking:
 #
-# - Previous status is persisted in the `state` branch (status.txt)
-# - The `state` branch is separate from main — main history stays clean
+# - Previous status per URL is persisted in the `state` branch (status.txt)
+# - status.txt format: one line per URL, "URL=STATUS"
+# - The `state` branch is separate from main (main history stays clean)
 # - State commits never appear on main
 #
 # Known limitation:
 #
 # - On the very first run, status.txt does not exist
-# - Previous state defaults to UP on first run
+# - Any URL not yet in status.txt defaults to UP
 # - This means a first-run DOWN will correctly trigger an alert
 #
 # ==========================================================
@@ -62,7 +73,7 @@ jobs:
     # ENV VARIABLES (SET IN REPO SETTINGS)
     # ======================================================
     env:
-      TARGET_URL: ${{ vars.TARGET_URL }}     # URL to monitor
+      TARGET_URL: ${{ vars.TARGET_URL }}     # URL(s) to monitor, comma-separated
       EMAIL_TO: ${{ secrets.EMAIL_TO }}      # alert destination email
       GMAIL_USER: ${{ secrets.GMAIL_USER }}  # Gmail sender
       GMAIL_PASS: ${{ secrets.GMAIL_PASS }}  # Gmail APP PASSWORD (NOT normal password)
@@ -146,104 +157,148 @@ jobs:
           echo "[INFO] ============================"
 
       # ======================================================
-      # STEP 3: CHECK WEBSITE
+      # STEP 3: CHECK SITES (LOOP OVER COMMA-SEPARATED TARGET_URL)
       # ======================================================
-      - name: Check site
+      - name: Check sites
         id: check
         run: |
           set -euo pipefail
 
           echo "[INFO] ========== SITE CHECK =========="
-          echo "[INFO] Checking URL: $TARGET_URL"
 
-          # FIX: initialize CURL_EXIT=0 before curl so it's never unbound under set -u
-          CURL_EXIT=0
-          CURL_OUTPUT=$(curl -v --max-time 10 --connect-timeout 5 -o /dev/null -s -w '%{http_code}' "$TARGET_URL" 2>&1) || CURL_EXIT=$?
+          IFS=',' read -ra URLS <<< "$TARGET_URL"
 
-          HTTP_CODE=$(echo "$CURL_OUTPUT" | tail -n1)
+          RESULTS=""
 
-          echo "[INFO] ---- CURL OUTPUT ----"
-          echo "[INFO] $CURL_OUTPUT"
-          echo "[INFO] ---------------------"
+          for RAW_URL in "${URLS[@]}"; do
+            URL=$(echo "$RAW_URL" | xargs)
+            [ -z "$URL" ] && continue
 
-          if [ "$CURL_EXIT" != "0" ]; then
-            echo  "[ERROR] NETWORK FAILURE"
-            echo  "[ERROR] DETAIL: DNS failure, timeout, or unreachable host"
-            HTTP_CODE="000"
-          fi
+            echo "[INFO] Checking URL: $URL"
 
-          echo "[INFO] HTTP_CODE=$HTTP_CODE"
+            # FIX: initialize CURL_EXIT=0 before curl so it's never unbound under set -u
+            CURL_EXIT=0
+            CURL_OUTPUT=$(curl -v --max-time 10 --connect-timeout 5 -o /dev/null -s -w '%{http_code}' "$URL" 2>&1) || CURL_EXIT=$?
 
-          if [ "$HTTP_CODE" = "200" ]; then
-            STATUS="UP"
-          else
-            STATUS="DOWN"
-          fi
+            HTTP_CODE=$(echo "$CURL_OUTPUT" | tail -n1)
 
-          echo "[INFO] STATUS=$STATUS"
+            echo "[INFO] ---- CURL OUTPUT ----"
+            echo "[INFO] $CURL_OUTPUT"
+            echo "[INFO] ---------------------"
+
+            if [ "$CURL_EXIT" != "0" ]; then
+              echo  "[ERROR] NETWORK FAILURE"
+              echo  "[ERROR] DETAIL: DNS failure, timeout, or unreachable host"
+              HTTP_CODE="000"
+            fi
+
+            echo "[INFO] HTTP_CODE=$HTTP_CODE"
+
+            if [ "$HTTP_CODE" = "200" ]; then
+              STATUS="UP"
+            else
+              STATUS="DOWN"
+            fi
+
+            echo "[INFO] STATUS=$STATUS"
+
+            RESULTS="${RESULTS}${URL}=${STATUS}"$'\n'
+          done
+
           echo "[INFO] ==============================="
 
-          echo "status=$STATUS" >> "$GITHUB_OUTPUT"
-          echo "http_code=$HTTP_CODE" >> "$GITHUB_OUTPUT"
+          {
+            echo "results<<SITECHECK_EOF"
+            printf '%s' "$RESULTS"
+            echo "SITECHECK_EOF"
+          } >> "$GITHUB_OUTPUT"
 
       # ======================================================
       # STEP 4: RESTORE PREVIOUS STATE (STATE BRANCH)
       # ======================================================
       # Reads status.txt from the root of the `state` branch.
-      # This branch only holds status.txt — never shown on main.
-      # If the branch or file does not exist, PREV_STATUS defaults to UP.
+      # Format: one line per URL, "URL=STATUS"
+      # This branch only holds status.txt (never shown on main).
+      # Any URL missing from status.txt defaults to UP.
       - name: Restore previous status
         id: restore
         run: |
           echo "[INFO] ========== STATE RESTORE =========="
 
-          PREV_STATUS="UP"
+          PREV_CONTENT=""
 
-          # Attempt to fetch state branch — may not exist on first run
+          # Attempt to fetch state branch, may not exist on first run
           if git ls-remote --exit-code origin state > /dev/null 2>&1; then
             git fetch origin state
             git checkout origin/state -- status.txt 2>/dev/null || true
 
             if [ -f status.txt ]; then
-              PREV_STATUS=$(cat status.txt)
+              PREV_CONTENT=$(cat status.txt)
               echo "[INFO] State file found"
             else
-              echo "[INFO] State file not found on state branch — defaulting to UP"
+              echo "[INFO] State file not found on state branch, defaulting all to UP"
             fi
           else
-            echo "[INFO] State branch does not exist yet — defaulting to UP"
+            echo "[INFO] State branch does not exist yet, defaulting all to UP"
           fi
 
-          echo "[INFO] PREV_STATUS=$PREV_STATUS"
+          echo "[INFO] $PREV_CONTENT"
           echo "[INFO] ======================================="
 
-          echo "prev_status=$PREV_STATUS" >> "$GITHUB_OUTPUT"
+          {
+            echo "prev_content<<RESTORE_EOF"
+            printf '%s' "$PREV_CONTENT"
+            echo "RESTORE_EOF"
+          } >> "$GITHUB_OUTPUT"
 
       # ======================================================
-      # STEP 5: DECIDE IF ALERT IS NEEDED
+      # STEP 5: DECIDE IF ALERT IS NEEDED, BUILD MESSAGE BODY
       # ======================================================
       - name: Decide alert
         id: decide
         run: |
-          STATUS="${{ steps.check.outputs.status }}"
-          PREV_STATUS="${{ steps.restore.outputs.prev_status }}"
-
-          echo "[INFO] CURRENT_STATUS=$STATUS"
-          echo "[INFO] PREVIOUS_STATUS=$PREV_STATUS"
+          CURRENT="${{ steps.check.outputs.results }}"
+          PREVIOUS="${{ steps.restore.outputs.prev_content }}"
 
           SEND_ALERT="false"
+          ANY_DOWN="false"
+          BODY=""
 
-          # RULES:
+          # RULES (per URL):
           # - Always alert if DOWN (repeat notifications)
           # - Alert once when recovering (DOWN -> UP)
-          if [ "$STATUS" = "DOWN" ]; then
-            SEND_ALERT="true"
-          elif [ "$STATUS" = "UP" ] && [ "$PREV_STATUS" = "DOWN" ]; then
-            SEND_ALERT="true"
-          fi
+          while IFS='=' read -r URL STATUS; do
+            [ -z "$URL" ] && continue
+
+            PREV_STATUS=$(echo "$PREVIOUS" | grep "^${URL}=" | cut -d'=' -f2)
+            [ -z "$PREV_STATUS" ] && PREV_STATUS="UP"
+
+            echo "[INFO] $URL CURRENT_STATUS=$STATUS PREVIOUS_STATUS=$PREV_STATUS"
+
+            if [ "$STATUS" = "DOWN" ]; then
+              SEND_ALERT="true"
+              ANY_DOWN="true"
+            elif [ "$STATUS" = "UP" ] && [ "$PREV_STATUS" = "DOWN" ]; then
+              SEND_ALERT="true"
+            fi
+
+            BODY="${BODY}<${URL}>: ${STATUS}"$'\n'
+          done <<< "$CURRENT"
 
           echo "[INFO] SEND_ALERT=$SEND_ALERT"
           echo "send_alert=$SEND_ALERT" >> "$GITHUB_OUTPUT"
+
+          if [ "$ANY_DOWN" = "true" ]; then
+            echo "subject=SITE DOWN" >> "$GITHUB_OUTPUT"
+          else
+            echo "subject=SITE UP" >> "$GITHUB_OUTPUT"
+          fi
+
+          {
+            echo "body<<DECIDE_EOF"
+            printf '%s' "$BODY"
+            echo "DECIDE_EOF"
+          } >> "$GITHUB_OUTPUT"
 
       # ======================================================
       # STEP 6: INSTALL SMTP CLIENT (ONLY IF NEEDED)
@@ -293,27 +348,23 @@ jobs:
       # ======================================================
       # STEP 8: SEND ALERTS (ONLY IF NEEDED)
       # ======================================================
+      # Message body, one line per monitored URL:
+      #   <url>: UP
+      #   <url>: DOWN
       - name: Send alerts
         if: steps.decide.outputs.send_alert == 'true'
         run: |
           set -euo pipefail
 
-          STATUS="${{ steps.check.outputs.status }}"
-          CODE="${{ steps.check.outputs.http_code }}"
+          SUBJECT="${{ steps.decide.outputs.subject }}"
+          BODY="${{ steps.decide.outputs.body }}"
 
           echo "[INFO] ========== ALERT PHASE =========="
-          echo "[INFO] STATUS=$STATUS"
-          echo "[INFO] HTTP_CODE=$CODE"
+          echo "[INFO] SUBJECT=$SUBJECT"
+          echo "[INFO] BODY:"
+          echo "[INFO] $BODY"
 
-          if [ "$STATUS" = "DOWN" ]; then
-            SUBJECT="SITE DOWN"
-            BODY="$TARGET_URL is DOWN (status $CODE)"
-          else
-            SUBJECT="SITE UP"
-            BODY="$TARGET_URL is UP"
-          fi
-
-          echo -e "Subject: $SUBJECT\n\n$BODY" > mail.txt
+          printf 'Subject: %s\n\n%s\n' "$SUBJECT" "$BODY" > mail.txt
 
           # --------------------------------------------------
           # EMAIL SEND
@@ -346,13 +397,14 @@ jobs:
       # STEP 9: SAVE STATE TO STATE BRANCH
       # ======================================================
       # Writes status.txt to the root of the `state` branch.
+      # Format: one line per URL, "URL=STATUS"
       # The `state` branch is completely separate from main.
-      # Main history stays clean — no state commits ever appear on main.
+      # Main history stays clean (no state commits ever appear on main).
       - name: Save state
         run: |
           echo "[INFO] ========== STATE SAVE =========="
 
-          STATUS="${{ steps.check.outputs.status }}"
+          RESULTS="${{ steps.check.outputs.results }}"
 
           # Configure git
           git config user.name "github-actions"
@@ -368,12 +420,13 @@ jobs:
             git rm -rf . > /dev/null 2>&1 || true
           fi
 
-          # Write status to root of state branch
-          echo "$STATUS" > status.txt
+          # Write all current statuses to root of state branch
+          printf '%s' "$RESULTS" > status.txt
 
           git add status.txt
           git diff --staged --quiet || git commit -m "state"
           git push origin state
 
-          echo "[INFO] STATUS=$STATUS saved to state branch"
+          echo "[INFO] Saved to state branch:"
+          echo "[INFO] $RESULTS"
           echo "[INFO] ==================================="
