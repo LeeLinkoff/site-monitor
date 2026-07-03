@@ -209,7 +209,7 @@ jobs:
 
           {
             echo "results<<SITECHECK_EOF"
-            printf '%s' "$RESULTS"
+            printf '%s\n' "$RESULTS"
             echo "SITECHECK_EOF"
           } >> "$GITHUB_OUTPUT"
 
@@ -247,7 +247,7 @@ jobs:
 
           {
             echo "prev_content<<RESTORE_EOF"
-            printf '%s' "$PREV_CONTENT"
+            printf '%s\n' "$PREV_CONTENT"
             echo "RESTORE_EOF"
           } >> "$GITHUB_OUTPUT"
 
@@ -296,7 +296,7 @@ jobs:
 
           {
             echo "body<<DECIDE_EOF"
-            printf '%s' "$BODY"
+            printf '%s\n' "$BODY"
             echo "DECIDE_EOF"
           } >> "$GITHUB_OUTPUT"
 
